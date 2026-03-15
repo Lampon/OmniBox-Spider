@@ -1,7 +1,7 @@
 // @name 盘搜分组
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持，只支持tvbox接口
-// @version 1.0.4
+// @version 1.0.5
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/盘搜分组.js
 
 /**
@@ -928,7 +928,7 @@ async function detail(params) {
             if (episodes.length > 0) {
                 let finalSourceName = sourceName;
                 if (DRIVE_TYPE_CONFIG.includes(driveInfo.driveType)) {
-                    finalSourceName = `${sourceName}`;
+                    finalSourceName = `${displayName}-${sourceName}`;
                 }
 
                 playSources.push({
@@ -1007,7 +1007,7 @@ async function detail(params) {
 */
 async function play(params) {
     try {
-        const flag = params.flag || "";
+        let flag = params.flag || "";
         const playId = params.playId || "";
         const source = params.source || "";
 
@@ -1080,9 +1080,20 @@ async function play(params) {
             OmniBox.log("warn", `弹幕匹配失败: ${error.message}`);
         }
 
-        const playInfo = await OmniBox.getDriveVideoPlayInfo(shareURL, fileId, flag);
+        // 线路解析: 默认网页端走服务端代理，其它直连；若 flag 含前缀，取最后一段
+        let routeType = source === "web" ? "服务端代理" : "直连";
+        if (flag) {
+            if (flag.includes("-")) {
+                const parts = flag.split("-");
+                routeType = parts[parts.length - 1];
+            } else {
+                routeType = flag;
+            }
+        }
 
-        OmniBox.log("info", `使用线路: ${flag}`);
+        const playInfo = await OmniBox.getDriveVideoPlayInfo(shareURL, fileId, routeType);
+
+        OmniBox.log("info", `使用线路: ${routeType}`);
 
         if (!playInfo || !playInfo.url || !Array.isArray(playInfo.url) || playInfo.url.length === 0) {
             throw new Error("无法获取播放地址");
