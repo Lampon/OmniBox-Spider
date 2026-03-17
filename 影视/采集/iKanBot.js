@@ -2,7 +2,7 @@
 // @author 
 // @description 刮削：支持，弹幕：支持，嗅探：支持
 // @dependencies: axios, cheerio
-// @version 1.0.0
+// @version 1.0.1
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/采集/iKanBot.js
 
 
@@ -348,7 +348,7 @@ const parsePlaySourcesFromIkan = (playFrom, playList, vodName = '', videoId = ''
 /**
  * 首页
  */
-async function home(params) {
+async function home(params, context) {
     logInfo("进入首页");
     
     try {
@@ -393,7 +393,7 @@ async function home(params) {
                 list.push({
                     vod_id: $(item).attr('href'),
                     vod_name: img.attr('alt') || $(item).find('.title').text() || '未知标题',
-                    vod_pic: fixImageUrl(imgSrc, baseURL),
+                    vod_pic: fixImageUrl(imgSrc, context.baseURL),
                     vod_remarks: $(item).find('.label').text() || ''
                 });
             });
@@ -412,10 +412,10 @@ async function home(params) {
 /**
  * 分类列表
  */
-async function category(params) {
+async function category(params, context) {
     const { categoryId, page } = params;
     const pg = parseInt(page) || 1;
-    const baseURL = params?.context?.baseURL || params?.baseURL || "";
+    const baseURL = context?.baseURL || params?.baseURL || "";
     
     logInfo(`请求分类: ${categoryId}, 页码: ${pg}`);
     
@@ -457,9 +457,9 @@ async function category(params) {
 /**
  * 详情页
  */
-async function detail(params) {
+async function detail(params, context) {
     const videoId = params.videoId;
-    const baseURL = params?.context?.baseURL || params?.baseURL || "";
+    const baseURL = context?.baseURL || params?.baseURL || "";
     logInfo(`请求详情 ID: ${videoId}`);
     
     try {
@@ -628,10 +628,10 @@ async function detail(params) {
 /**
  * 搜索 - 保留严格匹配逻辑
  */
-async function search(params) {
+async function search(params, context) {
     const wd = params.keyword || params.wd || "";
     const pg = parseInt(params.page) || 1;
-    const baseURL = params?.context?.baseURL || params?.baseURL || "";
+    const baseURL = context?.baseURL || params?.baseURL || "";
     
     logInfo(`搜索关键词: ${wd}, 页码: ${pg}`);
     
