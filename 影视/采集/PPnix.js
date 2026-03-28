@@ -1,8 +1,8 @@
 // @name PPnix
 // @author 梦
-// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持
+// @description 刮削：暂不支持，弹幕：暂不支持，分类筛选：支持，播放链：更贴近官网
 // @dependencies: axios, cheerio
-// @version 1.4.0
+// @version 1.6.0
 // @downloadURL https://www.ppnix.com/cn/
 
 const OmniBox = require("omnibox_sdk");
@@ -281,6 +281,12 @@ function buildM3u8DataUrl(m3u8Text) {
   return `data:application/vnd.apple.mpegurl;base64,${Buffer.from(String(m3u8Text || ""), "utf8").toString("base64")}`;
 }
 
+function rewritePpnixM3u8LikeWeb(m3u8Text) {
+  const keyUrl = `${BASE_URL}/info/m3u8/key`;
+  return String(m3u8Text || "")
+    .replace(/URI="\.\.\/key"/g, `URI="${keyUrl}"`);
+}
+
 async function home(params, context) {
   try {
     const [homePage, moviePage, tvPage] = await Promise.all([
@@ -445,27 +451,30 @@ async function play(params, context) {
     const episodeName = text(meta.episodeName || param || "播放");
     const subtitles = buildSubtitleSelector(infoId, param);
 
-    let finalUrl = sourceUrl;
-    let parse = 0;
-
     if (PPNIX_REWRITE_M3U8) {
       try {
         const rawM3u8 = await fetchText(sourceUrl, header);
-        const rewritten = rewritePpnixM3u8(rawM3u8, referer);
-        finalUrl = buildM3u8DataUrl(rewritten);
-        OmniBox.log("info", `[play] 已重写 m3u8: infoId=${infoId}, param=${param}, key=/info/m3u8/key, segmentHost=${PPNIX_SEGMENT_HOST}`);
+        const rewritten = rewritePpnixM3u8LikeWeb(rawM3u8);
+        const finalUrl = buildM3u8DataUrl(rewritten);
+        OmniBox.log("info", `[play] 已按官网链路重写 m3u8: infoId=${infoId}, param=${param}, keepIpfsHost=true`);
+        return {
+          urls: [{ name: episodeName, url: finalUrl }],
+          flag: "PPnix",
+          header,
+          parse: 0,
+          danmaku: [],
+          subtitles,
+        };
       } catch (error) {
-        parse = 1;
-        finalUrl = sourceUrl;
-        OmniBox.log("warn", `[play] m3u8 重写失败，回退原始地址: ${error.message}`);
+        OmniBox.log("warn", `[play] 官网链路重写失败，回退原始地址: ${error.message}`);
       }
     }
 
     return {
-      urls: [{ name: episodeName, url: finalUrl }],
+      urls: [{ name: episodeName, url: sourceUrl }],
       flag: "PPnix",
       header,
-      parse,
+      parse: 1,
       danmaku: [],
       subtitles,
     };
