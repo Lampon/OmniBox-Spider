@@ -2,7 +2,7 @@
 // @author 梦
 // @description 刮削：未接入，弹幕：未接入，嗅探：不需要（直链优先，必要时客户端解析兜底）
 // @dependencies
-// @version 1.1.0
+// @version 1.2.0
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/openclaw/影视/采集/LIBVIO.js
 
 const http = require("http");
@@ -326,6 +326,51 @@ function parseMetaItems(html = "") {
     return ensureArray(html.match(/<span class="meta-item">([\s\S]*?)<\/span>/g)).map((item) => stripTags(item));
 }
 
+function inferDriveTypeFromSourceName(name = "") {
+    const raw = String(name || "").toLowerCase();
+    if (raw.includes("百度")) return "baidu";
+    if (raw.includes("天翼")) return "tianyi";
+    if (raw.includes("夸克")) return "quark";
+    if (raw === "uc" || raw.includes("uc")) return "uc";
+    if (raw.includes("115")) return "115";
+    if (raw.includes("迅雷")) return "xunlei";
+    if (raw.includes("阿里")) return "ali";
+    if (raw.includes("123")) return "123pan";
+    return raw;
+}
+
+function parseNetdiskSources(html = "", detailUrl = "") {
+    const blocks = [...html.matchAll(/<div class="playlist-panel\s+netdisk-panel">([\s\S]*?)<\/div>\s*<\/div>\s*<\/div>/g)];
+    const sources = [];
+
+    for (const matched of blocks) {
+        const block = matched[1] || "";
+        const sourceName = stripTags(block.match(/<h3>([\s\S]*?)<\/h3>/)?.[1] || "网盘");
+        const episodes = [...block.matchAll(/<a class="netdisk-item"[^>]*href="([^"]+)"[^>]*>[\s\S]*?<span class="netdisk-name">([\s\S]*?)<\/span>[\s\S]*?<span class="netdisk-url">([\s\S]*?)<\/span>/g)].map((item, index) => {
+            const shareUrl = stripTags(item[3] || item[1] || "").trim();
+            const epName = stripTags(item[2] || "网盘资源").trim() || `资源${index + 1}`;
+            const driveType = inferDriveTypeFromSourceName(sourceName);
+            return {
+                name: epName,
+                playId: encodePlayId({
+                    mode: "pan",
+                    url: fixUrl(item[1] || shareUrl),
+                    shareUrl,
+                    flag: sourceName,
+                    driveType,
+                    from: detailUrl,
+                })
+            };
+        }).filter((item) => decodePlayId(item.playId)?.shareUrl);
+
+        if (episodes.length) {
+            sources.push({ name: sourceName, episodes });
+        }
+    }
+
+    return sources;
+}
+
 function decodePlayerUrl(url = "", encrypt = 0) {
     let value = String(url || "").trim();
     const mode = Number(encrypt || 0);
@@ -421,12 +466,13 @@ async function detail(params, context) {
         const director = metaItems.find((item) => item.startsWith("导演："))?.replace(/^导演：/, "") || "";
 
         const sourceMatches = [...html.matchAll(/<div class="playlist-panel">([\s\S]*?)<\/ul>/g)];
-        const vod_play_sources = sourceMatches.map((matched) => {
+        const collectSources = sourceMatches.map((matched) => {
             const block = matched[1];
             const sourceName = stripTags(block.match(/<h3>([\s\S]*?)<\/h3>/)?.[1] || "播放");
             const episodes = [...block.matchAll(/href="([^"]*\/play\/[^\"]+\.html)"[^>]*>([\s\S]*?)<\/a>/g)].map((item) => ({
                 name: stripTags(item[2]),
                 playId: encodePlayId({
+                    mode: "collect",
                     url: fixUrl(item[1]),
                     flag: sourceName,
                     name: stripTags(item[2])
@@ -434,6 +480,8 @@ async function detail(params, context) {
             }));
             return { name: sourceName, episodes };
         }).filter((item) => item.episodes.length);
+        const netdiskSources = parseNetdiskSources(html, videoId);
+        const vod_play_sources = [...collectSources, ...netdiskSources];
 
         logInfo("detail 完成", { videoId, sourceCount: vod_play_sources.length, episodeCount: vod_play_sources.reduce((n, item) => n + item.episodes.length, 0) });
         return {
@@ -491,6 +539,17 @@ async function play(params, context) {
         const playPageUrl = meta.url;
         const playFlag = String(meta.flag || flag || "LIBVIO");
         if (!playPageUrl) return emptyPlay(playFlag);
+
+        if (meta.mode === "pan") {
+            const shareUrl = String(meta.shareUrl || "").trim();
+            const panUrl = shareUrl || playPageUrl;
+            logInfo("play 网盘线路", { panUrl, flag: playFlag, driveType: meta.driveType || "", from: context?.from || "web" });
+            return {
+                parse: 0,
+                flag: playFlag,
+                urls: [{ name: meta.name || "网盘资源", url: `push://${panUrl}` }]
+            };
+        }
 
         logInfo("play 请求", { playPageUrl, flag: playFlag, from: context?.from || "web" });
         const html = await fetchHtml(playPageUrl);
