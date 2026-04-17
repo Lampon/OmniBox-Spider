@@ -2,7 +2,7 @@
 // @author lampon
 // @description
 // @dependencies axios
-// @version 1.1.0
+// @version 1.1.2
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/影巢.js
 
 const OmniBox = require("omnibox_sdk");
@@ -295,6 +295,61 @@ function sortPlaySourcesByDriveOrder(playSources = []) {
     if (aOrder !== bOrder) return aOrder - bOrder;
     return 0;
   });
+}
+
+function normalizeEpisodeKeyword(value) {
+  return safeString(value)
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[【】\[\]()（）._\-]/g, "");
+}
+
+function pickBestEpisodeFile(files = [], episodeName = "") {
+  if (!Array.isArray(files) || files.length === 0) return null;
+  const keyword = normalizeEpisodeKeyword(episodeName);
+  if (keyword) {
+    const matched = files.find((file) =>
+      normalizeEpisodeKeyword(file?.episodeName || file?.file_name).includes(keyword),
+    );
+    if (matched) return matched;
+  }
+  return files[0] || null;
+}
+
+function sanitizeLegacyPlayText(value) {
+  return safeString(value).replace(/[#$]/g, " ").trim();
+}
+
+function buildLegacyPlayFields(playSources = []) {
+  if (!Array.isArray(playSources) || playSources.length === 0) {
+    return { vod_play_from: "", vod_play_url: "" };
+  }
+
+  const vodPlayFrom = [];
+  const vodPlayUrl = [];
+
+  for (const source of playSources) {
+    const sourceName = sanitizeLegacyPlayText(source?.name || "默认线路") || "默认线路";
+    const episodes = Array.isArray(source?.episodes) ? source.episodes : [];
+    const episodeItems = episodes
+      .map((episode, index) => {
+        const epName = sanitizeLegacyPlayText(episode?.name || episode?.episodeName || `第${index + 1}集`) || `第${index + 1}集`;
+        const playId = safeString(episode?.playId || "");
+        if (!playId) return "";
+        return `${epName}$${playId}`;
+      })
+      .filter(Boolean);
+
+    if (episodeItems.length > 0) {
+      vodPlayFrom.push(sourceName);
+      vodPlayUrl.push(episodeItems.join("#"));
+    }
+  }
+
+  return {
+    vod_play_from: vodPlayFrom.join("$$$"),
+    vod_play_url: vodPlayUrl.join("$$$"),
+  };
 }
 
 function isVideoFile(file) {
@@ -1466,7 +1521,7 @@ async function detail(params, context) {
         const finalLineName =
           DRIVE_TYPE_CONFIG.includes(String(driveInfo?.driveType || "").toLowerCase())
             ? `${baseLineName}-${lineName}`
-            : baseLineName;
+            : `${baseLineName}-网盘线路`;
         playSources.push({
           name: finalLineName,
           baseSourceName: baseLineName,
@@ -1530,6 +1585,8 @@ async function detail(params, context) {
       );
     }
 
+    const legacyPlayFields = buildLegacyPlayFields(playSources);
+
     return {
       list: [
         {
@@ -1542,6 +1599,8 @@ async function detail(params, context) {
           vod_content:
             tmdbOverview || `HDHive 资源，共 ${episodes.length} 个视频文件`,
           vod_play_sources: playSources,
+          vod_play_from: legacyPlayFields.vod_play_from,
+          vod_play_url: legacyPlayFields.vod_play_url,
           vod_douban_score: tmdbScore,
         },
       ],
@@ -1562,13 +1621,36 @@ async function play(params, context) {
     if (!playId) throw new Error("playId 不能为空");
 
     const parts = playId.split("|");
-    if (parts.length < 2) throw new Error(`playId 格式错误: ${playId}`);
-    const shareURL = safeString(parts[0]);
-    const fileId = safeString(parts[1]);
+    let shareURL = safeString(parts[0]);
+    let fileId = safeString(parts[1]);
     // 第三段可能是 detail 透传过来的原始 vodId（JSON字符串）
-    const rawVodIdFromPlayId =
+    let rawVodIdFromPlayId =
       parts.length >= 3 ? safeString(parts.slice(2).join("|")) : "";
-    if (!shareURL || !fileId) throw new Error("分享链接或文件ID为空");
+
+    if (!shareURL) throw new Error("分享链接为空");
+
+    if (!fileId) {
+      await OmniBox.log(
+        "warn",
+        `tmdb.js play 收到缺少 fileId 的 playId，尝试按 shareURL 兜底解析: ${playId}`,
+      );
+      const rootList = await OmniBox.getDriveFileList(shareURL, "0");
+      const allVideoFiles = await getAllVideoFiles(shareURL, rootList?.files || []);
+      const enrichedFiles = allVideoFiles.map((file) => ({
+        ...file,
+        fileId: safeString(file?.fid || file?.file_id),
+        episodeName: safeString(file?.episodeName || params?.episodeName || ""),
+      })).filter((file) => file.fileId);
+      const matchedFile = pickBestEpisodeFile(enrichedFiles, params?.episodeName || "");
+      if (!matchedFile || !matchedFile.fileId) {
+        throw new Error(`playId 缺少文件ID且兜底未找到可播放文件: ${playId}`);
+      }
+      fileId = safeString(matchedFile.fileId);
+      await OmniBox.log(
+        "info",
+        `tmdb.js play 兜底命中文件: ${safeString(matchedFile.file_name)} -> ${fileId}`,
+      );
+    }
 
     // 参考 pansou.js：匹配元数据用于弹幕和历史写入
     let danmakuList = [];
