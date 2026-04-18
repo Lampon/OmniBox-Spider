@@ -42,6 +42,8 @@ const _http = axios.create({
   httpAgent: new http.Agent({ keepAlive: true }),
 });  
 
+let aowuValidatorCookie = "";
+
 const PLAY_HEADERS = {
   "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1",
   "Referer": "https://www.aowu.tv/",
@@ -76,6 +78,35 @@ const decodeMeta = (str) => {
     return {};
   }
 };
+
+function buildAowuHeaders(extra = {}) {
+  return {
+    ...aowuConfig.headers,
+    ...(aowuValidatorCookie ? { Cookie: aowuValidatorCookie } : {}),
+    ...extra,
+  };
+}
+
+async function getWithValidator(url, options = {}) {
+  let response = await _http.get(url, {
+    ...options,
+    headers: buildAowuHeaders(options.headers || {}),
+  });
+  const html = String(response?.data || "");
+  const cookieMatch = html.match(/document\.cookie\s*=\s*"([^"]*fl_js_validator_[^"]*)"/i);
+  if (cookieMatch && cookieMatch[1]) {
+    const validatorCookie = cookieMatch[1].split(';')[0].trim();
+    if (validatorCookie) {
+      aowuValidatorCookie = validatorCookie;
+      logInfo('命中 JS validator，注入 Cookie 后重试', validatorCookie);
+      response = await _http.get(url, {
+        ...options,
+        headers: buildAowuHeaders(options.headers || {}),
+      });
+    }
+  }
+  return response;
+}
 
 // ========== 弹幕相关函数 ==========  
 
@@ -281,9 +312,8 @@ const parseAowuPlayPage = async (playUrl) => {
   try {
     logInfo('解析嗷呜动漫播放页', playUrl);  
     
-    const response = await _http.get(playUrl, {
+    const response = await getWithValidator(playUrl, {
       headers: {
-        ...aowuConfig.headers,
         "Referer": aowuConfig.host + "/"
       }
     });  
@@ -475,7 +505,7 @@ async function home(params) {
   logInfo("进入首页");
   try {
     const url = aowuConfig.host + "/";
-    const response = await _http.get(url, { headers: aowuConfig.headers });
+    const response = await getWithValidator(url);
     const html = response.data;  
     
     const list = [];
@@ -591,7 +621,7 @@ async function search(params) {
   try {
     const searchPath = `/search/${encodeURIComponent(keyword)}----------${pg}---/`;
     const url = aowuConfig.host + searchPath;
-    const response = await _http.get(url, { headers: aowuConfig.headers });
+    const response = await getWithValidator(url);
     const html = response.data;  
     
     const list = [];
@@ -642,14 +672,14 @@ async function detail(params) {
     let detailUrl = videoId.startsWith('http') ? videoId : aowuConfig.host + '/' + videoId;
     logInfo('获取详情', detailUrl);  
     
-    const response = await _http.get(detailUrl, { headers: aowuConfig.headers });
+    const response = await getWithValidator(detailUrl);
     const html = response.data;
     const $ = cheerio.load(html);  
     
     // 基本信息
-    const vod_name = $('h3').text().trim() || $('title').text().replace(' - 嗷呜动漫', '').trim();
-    const vod_content = $('.switch-box').text().trim() || $('.vod_content').text().trim();
-    const vod_pic = $('.vodlist_thumb').data('original') || $('.vodlist_thumb').attr('src') || $('img.lazy').attr('src');  
+    let vod_name = $('h3').text().trim() || $('title').text().replace(' - 嗷呜动漫', '').trim();
+    let vod_content = $('.switch-box').text().trim() || $('.vod_content').text().trim();
+    let vod_pic = $('.vodlist_thumb').data('original') || $('.vodlist_thumb').attr('src') || $('img.lazy').attr('src');  
     
     // 播放列表提取
     const playmap = {};
@@ -712,32 +742,70 @@ async function detail(params) {
       if (playmap['播放列表']) {
         logInfo(`直接查找找到 ${playmap['播放列表'].length} 个剧集`);
       }
-    }  
-    
-    // 如果还是没有找到,创建默认播放线路
+    }
+
+    // HTML 没拿到有效播放列表时，回退 API 详情
     if (Object.keys(playmap).length === 0) {
-      logInfo('未找到播放列表,创建默认线路');
-      playmap['主线路'] = [`第1集$${detailUrl}`];
-      playLines.push('主线路');
-    }  
-    
-    // 处理屏蔽逻辑:如果有3条线路,屏蔽第一条
-    let vod_play_from, vod_play_url;  
-    
+      logInfo('HTML 未拿到播放列表，回退 ds_api/vod detail');
+      const match = detailUrl.match(/\/bangumi\/([^\/]+)/);
+      const code = match ? match[1] : '';
+      if (code) {
+        try {
+          const apiUrl = `${aowuConfig.host}/index.php/ds_api/vod`;
+          const apiResponse = await _http.post(apiUrl, {
+            ac: 'detail',
+            ids: code,
+          }, {
+            headers: {
+              ...aowuConfig.headers,
+              'Content-Type': 'application/json',
+            }
+          });
+          const apiJson = apiResponse.data || {};
+          const apiItem = Array.isArray(apiJson.list) && apiJson.list.length > 0 ? apiJson.list[0] : null;
+          if (apiItem) {
+            vod_name = apiItem.vod_name || vod_name;
+            vod_pic = apiItem.vod_pic || vod_pic;
+            vod_content = apiItem.vod_content || vod_content;
+            const apiPlayFrom = apiItem.vod_play_from || '';
+            const apiPlayUrl = apiItem.vod_play_url || '';
+            if (apiPlayFrom && apiPlayUrl) {
+              logInfo('API 详情回退拿到播放列表');
+              const apiFroms = String(apiPlayFrom).split('$$$');
+              const apiUrls = String(apiPlayUrl).split('$$$');
+              for (let i = 0; i < apiFroms.length; i++) {
+                const line = (apiFroms[i] || '').trim();
+                const lineUrls = (apiUrls[i] || '').trim();
+                if (!line || !lineUrls) continue;
+                playmap[line] = lineUrls.split('#').filter(Boolean);
+                if (playmap[line].length > 0) playLines.push(line);
+              }
+            }
+          }
+        } catch (apiError) {
+          logInfo(`API 详情回退失败: ${apiError.message}`);
+        }
+      }
+    }
+
+    let vod_play_from = '';
+    let vod_play_url = '';
     if (playLines.length === 3) {
       logInfo(`检测到3条播放线路,屏蔽第一条: ${playLines[0]}`);
       delete playmap[playLines[0]];
-      const filteredPlayLines = playLines.slice(1);
+      const filteredPlayLines = playLines.slice(1).filter((line) => Array.isArray(playmap[line]) && playmap[line].length > 0);
       vod_play_from = filteredPlayLines.join('$$$');
       const playUrls = filteredPlayLines.map(line => playmap[line].join("#"));
       vod_play_url = playUrls.join('$$$');
       logInfo(`屏蔽后剩余线路: ${vod_play_from}`);
-    } else {
+    } else if (playLines.length > 0) {
       vod_play_from = playLines.join('$$$');
       const playUrls = playLines.map(line => playmap[line].join("#"));
       vod_play_url = playUrls.join('$$$');
       logInfo(`线路数量 ${playLines.length} 条,不进行屏蔽`);
-    }  
+    } else {
+      logInfo('详情未获取到任何有效播放线路');
+    }
     
     // 转换为 OmniBox 格式的播放源（传入视频名）
     const videoIdForScrape = String(videoId || '');
