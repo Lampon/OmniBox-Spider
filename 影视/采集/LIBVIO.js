@@ -147,11 +147,55 @@ function encodePlayId(payload) {
 }
 
 function decodePlayId(playId = "") {
+    const input = String(playId || "").trim();
+    if (!input) return {};
+
+    // 1) 标准 base64 JSON
     try {
-        return JSON.parse(Buffer.from(playId, "base64").toString("utf8"));
-    } catch {
-        return {};
-    }
+        const text = Buffer.from(input, "base64").toString("utf8").trim();
+        if (text.startsWith("{") && text.endsWith("}")) {
+            return JSON.parse(text);
+        }
+    } catch {}
+
+    // 2) URL-safe base64 JSON（-/_）
+    try {
+        const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
+        const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+        const text = Buffer.from(padded, "base64").toString("utf8").trim();
+        if (text.startsWith("{") && text.endsWith("}")) {
+            return JSON.parse(text);
+        }
+    } catch {}
+
+    // 3) 直接 JSON 字符串
+    try {
+        if (input.startsWith("{") && input.endsWith("}")) {
+            return JSON.parse(input);
+        }
+    } catch {}
+
+    return {};
+}
+
+function resolveCollectPlayPageUrl(rawPlayId = "", meta = {}) {
+    const raw = String(rawPlayId || "").trim();
+
+    // 优先用编码后的 meta.url
+    const metaUrl = fixUrl(String(meta?.url || "").trim());
+    if (/^https?:\/\//i.test(metaUrl)) return metaUrl;
+
+    // raw 已是绝对/相对路径
+    if (/^https?:\/\//i.test(raw)) return raw;
+    if (/^\//.test(raw)) return fixUrl(raw);
+    if (/^[^\s]+\.html?(\?.*)?$/i.test(raw)) return fixUrl(`/${raw}`);
+
+    // raw 可能本身是 base64/json 打包过的 playId
+    const nested = decodePlayId(raw);
+    const nestedUrl = fixUrl(String(nested?.url || "").trim());
+    if (/^https?:\/\//i.test(nestedUrl)) return nestedUrl;
+
+    return "";
 }
 
 function buildFilterList(categoryId) {
@@ -689,9 +733,12 @@ async function play(params, context) {
     if (!playId) return emptyPlay(flag);
     try {
         const { main: rawPlayId, meta } = decodeCombinedPlayId(playId);
-        const playPageUrl = rawPlayId;
+        const playPageUrl = resolveCollectPlayPageUrl(rawPlayId, meta);
         const playFlag = String(meta.flag || flag || "LIBVIO");
-        if (!playPageUrl) return emptyPlay(playFlag);
+        if (!playPageUrl) {
+            logInfo("play 无法解析播放页地址", { rawPlayId, flag: playFlag, meta });
+            return emptyPlay(playFlag);
+        }
 
         if (meta.mode === "pan-file") {
             const shareURL = normalizeShareUrl(meta.shareUrl || "");
